@@ -30,10 +30,13 @@
                 "MODEL.WEIGHTS",
                 "checkpoints/gres_res50.pth",
                 "OUTPUT_DIR",
-                "output_dir/referring_res50/eval"
+                "output_dir/referring_res50/eval",
+                "REFMODEL",
+                "CLIP@HQES"
             ],
             "console": "integratedTerminal",
-            "justMyCode": false
+            // "justMyCode": false
+            "justMyCode": true
         }
     ]
 }

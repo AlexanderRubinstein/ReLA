@@ -3,6 +3,20 @@ GRES Training Script.
 
 This script is a simplified version of the training script in detectron2/tools.
 """
+import os
+import sys
+
+OCCAM_ROOT = "/weka/oh/arubinstein17/github/OCCAM"
+HORNET_CONFIG = os.path.join(OCCAM_ROOT, "configs", "cropformer", "cropformer_hornet.yaml")
+HORNET_WEIGHTS = os.path.join(OCCAM_ROOT, "checkpoints", "CropFormer_hornet_3x_03823a.pth")
+CONF_THRESHOLD = 0.5
+from stuned.utility.utils import AttrDict
+sys.path.insert(
+    # 0, (os.path.dirname(os.path.dirname(__file__)))
+    0, (OCCAM_ROOT)
+)  # to allow importing from get_segments directly
+from occam.get_segments.run_cropformer import EntitySegDecoder
+sys.path.pop(0)
 try:
     # ignore ShapelyDeprecationWarning from fvcore
     from shapely.errors import ShapelyDeprecationWarning
@@ -14,7 +28,7 @@ except:
 import copy
 import itertools
 import logging
-import os
+# import os
 
 from functools import reduce
 import operator
@@ -50,6 +64,9 @@ from gres_model import (
 )
 from gres_model.data.samplers import RandomSubsetTrainingSampler
 
+import torch.nn as nn
+# import sys
+import numpy as np
 
 class Trainer(DefaultTrainer):
 
@@ -202,7 +219,13 @@ def main(args):
     cfg = setup(args)
 
     if args.eval_only:
-        model = Trainer.build_model(cfg)
+        if "CLIP" in cfg.REFMODEL:
+            assert "@" in cfg.REFMODEL
+            mask_generator = cfg.REFMODEL.split("@")[1]
+            model = build_clip_ref(mask_generator)
+        else:
+            assert args.model is None
+            model = Trainer.build_model(cfg)
         DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
             cfg.MODEL.WEIGHTS, resume=args.resume
         )
@@ -214,6 +237,43 @@ def main(args):
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
     return trainer.train()
+
+
+def build_clip_ref(mask_generator):
+    return ClipRefModel(mask_generator)
+
+
+class ClipRefModel(nn.Module):
+    def __init__(self, mask_generator):
+        super().__init__()
+        if mask_generator == "HQES":
+            self.mask_generator = build_hqes()
+        else:
+            raise ValueError(f"Invalid mask generator: {mask_generator}")
+        self.clip_model = build_clip_model() # SigLipV2 SO‑400M
+
+    def forward(self, x):
+        image = x[0]['image'].permute(1, 2, 0).unsqueeze(0)
+        masks = self.mask_generator(image)
+        num_masks = int(masks.max()) + 1
+        masks_as_image = torch.zeros(
+            (num_masks, masks.shape[0], masks.shape[1])
+        ).to(torch.bool)
+        for mask_value in range(num_masks):
+            masks_as_image[mask_value] = torch.Tensor(masks == mask_value)
+        return masks_as_image
+
+
+def build_clip_model():
+    return None
+
+
+def build_hqes():
+    return EntitySegDecoder(
+        config_path=HORNET_CONFIG,
+        opts=["MODEL.WEIGHTS", HORNET_WEIGHTS],
+        confidence_threshold=CONF_THRESHOLD
+    )
 
 
 if __name__ == "__main__":
