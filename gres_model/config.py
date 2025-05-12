@@ -127,3 +127,8 @@ def add_refcoco_config(cfg):
     cfg.REFERRING = CN()
     cfg.REFERRING.BERT_TYPE = "bert-base-uncased"
     cfg.REFERRING.MAX_TOKENS = 20
+
+    cfg.TEST.NUM_BATCHES = None
+    cfg.DATALOADER.SAMPLER_TRAIN = None
+    cfg.DATALOADER.SAMPLER_TEST = None
+    cfg.DATALOADER.RANDOM_SUBSET_RATIO = None
