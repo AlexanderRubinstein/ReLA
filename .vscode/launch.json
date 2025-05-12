@@ -32,7 +32,8 @@
                 "OUTPUT_DIR",
                 "output_dir/referring_res50/eval"
             ],
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "justMyCode": false
         }
     ]
 }

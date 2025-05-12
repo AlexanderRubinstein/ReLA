@@ -48,6 +48,7 @@ from gres_model import (
     add_maskformer2_config,
     add_refcoco_config
 )
+from gres_model.data.samplers import RandomSubsetTrainingSampler
 
 
 class Trainer(DefaultTrainer):
@@ -77,7 +78,13 @@ class Trainer(DefaultTrainer):
     def build_test_loader(cls, cfg, dataset_name):
         assert cfg.INPUT.DATASET_MAPPER_NAME == "refcoco"
         mapper = RefCOCOMapper(cfg, False)
-        return build_detection_test_loader(cfg, dataset_name, mapper=mapper)
+
+        data_loader = build_detection_test_loader(cfg, dataset_name, mapper=mapper)
+        if cfg.DATALOADER.SAMPLER_TEST == "RandomSubsetTrainingSampler":
+            subset_sampler = RandomSubsetTrainingSampler(len(data_loader.dataset), cfg.DATALOADER.RANDOM_SUBSET_RATIO)
+            data_loader = build_detection_test_loader(cfg, dataset_name, mapper=mapper, sampler=subset_sampler)
+
+        return data_loader
 
     @classmethod
     def build_lr_scheduler(cls, cfg, optimizer):
@@ -137,7 +144,7 @@ class Trainer(DefaultTrainer):
         hyperparams = copy.copy(defaults)
         params.append({"params": reduce(operator.concat,
                                         [[p for p in model.text_encoder.encoder.layer[i].parameters()
-                                          if p.requires_grad] for i in range(10)]), 
+                                          if p.requires_grad] for i in range(10)]),
                         **hyperparams
                      })
 
