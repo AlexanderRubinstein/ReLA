@@ -72,7 +72,7 @@ model_ts*.txt
 
 # editor settings
 .idea
-.vscode
+# .vscode
 _darcs
 
 # project dirs

@@ -1,0 +1,38 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        // {
+        //     "name": "Python Debugger: Current File",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "${file}",
+        //     "console": "integratedTerminal"
+        // }
+        {
+            "name": "Train Net Eval",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "train_net.py",
+            "args": [
+                "--config-file",
+                // "configs/referring_swin_base.yaml",
+                "./configs/referring_R50.yaml",
+                "--num-gpus",
+                // "8",
+                "1",
+                "--dist-url",
+                "auto",
+                "--eval-only",
+                "MODEL.WEIGHTS",
+                "checkpoints/gres_res50.pth",
+                "OUTPUT_DIR",
+                "output_dir/referring_res50/eval"
+            ],
+            "console": "integratedTerminal"
+        }
+    ]
+}
