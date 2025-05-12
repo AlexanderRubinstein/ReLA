@@ -132,3 +132,4 @@ def add_refcoco_config(cfg):
     cfg.DATALOADER.SAMPLER_TRAIN = None
     cfg.DATALOADER.SAMPLER_TEST = None
     cfg.DATALOADER.RANDOM_SUBSET_RATIO = None
+    cfg.REFMODEL = None
