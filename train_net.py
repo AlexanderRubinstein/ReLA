@@ -15,11 +15,16 @@ HORNET_CONFIG = os.path.join(OCCAM_ROOT, "configs", "cropformer", "cropformer_ho
 HORNET_WEIGHTS = os.path.join(OCCAM_ROOT, "checkpoints", "CropFormer_hornet_3x_03823a.pth")
 CONF_THRESHOLD = 0.5
 NO_TARGET_THRESHOLD = 0.02
+NO_TARGET_THRESHOLD_ALPHA_CLIP = 0.0 # 20.0
+ALPHA_CLIP_MODEL_ID = "ViT-L/14"
 RANDOM_SEED = 42
 from stuned.utility.utils import (
     AttrDict,
     apply_random_seed
 )
+# from stuned.utility.transforms import (
+#     make_transforms
+# )
 sys.path.insert(
     # 0, (os.path.dirname(os.path.dirname(__file__)))
     0, (OCCAM_ROOT)
@@ -29,6 +34,13 @@ from occam.robust_classification.masking import is_background
 from occam.robust_classification.eval import (
     BORDER_VS_AREA_RATIO,
     compute_border_touch
+)
+from occam.submodules.alpha_clip_wrapper import (
+    ALPHA_CLIP_IMAGE_PREPROCESS_CONFIG,
+    make_alpha_clip_model
+)
+from occam.datasets.bboxed_dataset import (
+    make_common_and_specific_transforms
 )
 sys.path.pop(0)
 try:
@@ -236,13 +248,14 @@ def main(args):
     if args.eval_only:
         if cfg.REFMODEL is not None and "CLIP" in cfg.REFMODEL:
             assert "@" in cfg.REFMODEL
+            clip_type = cfg.REFMODEL.split("@")[0]
             mask_generator = cfg.REFMODEL.split("@")[1]
             if "-" in mask_generator:
                 mask_generator, prediction_method = mask_generator.split("-")
                 # prediction_method = cfg.REFMODEL.split("-")[1]
             else:
                 prediction_method = "best_clip_score"
-            model = build_clip_ref(mask_generator, prediction_method)
+            model = build_clip_ref(mask_generator, clip_type, prediction_method)
         else:
             # assert args.model is None
             model = Trainer.build_model(cfg)
@@ -259,18 +272,18 @@ def main(args):
     return trainer.train()
 
 
-def build_clip_ref(mask_generator, prediction_method="best_clip_score"):
-    return ClipRefModel(mask_generator, prediction_method)
+def build_clip_ref(mask_generator, clip_type, prediction_method="best_clip_score"):
+    return ClipRefModel(mask_generator, clip_type, prediction_method)
 
 
 class ClipRefModel(nn.Module):
-    def __init__(self, mask_generator, prediction_method="best_clip_score"):
+    def __init__(self, mask_generator, clip_type, prediction_method="best_clip_score"):
         super().__init__()
         if mask_generator == "HQES":
             self.mask_generator = build_hqes()
         else:
             raise ValueError(f"Invalid mask generator: {mask_generator}")
-        self.clip_model = build_clip_model()
+        self.clip_model = build_clip_model(clip_type)
         self.prediction_method = prediction_method
 
     def forward(self, x):
@@ -287,11 +300,12 @@ class ClipRefModel(nn.Module):
         image_ready_for_masking = image[0].permute(2, 0, 1)
 
         # applied_masks = []
+        sentence = x[0]['sentence']
         best_mask, best_clip_score = get_best_mask(
             image_ready_for_masking,
             masks_as_image,
             self.clip_model,
-            x[0]['sentence'],
+            sentence,
             prediction_method=self.prediction_method
         )
         # best_mask, best_clip_score = get_best_mask(
@@ -310,8 +324,14 @@ class ClipRefModel(nn.Module):
         # 1 - best mask
 
         res = {}
-        if best_clip_score > NO_TARGET_THRESHOLD:
-            res['nt_label'] = torch.tensor([(1 - best_clip_score), (best_clip_score)])
+        if isinstance(self.clip_model, AlphaClipClassifier):
+            no_target_threshold = NO_TARGET_THRESHOLD_ALPHA_CLIP
+        else:
+            no_target_threshold = NO_TARGET_THRESHOLD
+
+        if best_clip_score > no_target_threshold:
+            # res['nt_label'] = torch.tensor([(1 - best_clip_score), (best_clip_score)]).softmax(dim=0) # need softmax in case of clip scores outside of [0, 1]
+            res['nt_label'] = torch.tensor([1.0, 0.0]) # need softmax in case of clip scores outside of [0, 1]
             best_mask = best_mask.to(torch.int).unsqueeze(0)
             res['ref_seg'] = torch.cat([1 - best_mask, best_mask], dim=0)
         else:
@@ -331,26 +351,27 @@ def get_best_mask(
 ):
 
     def predict_for_mask(image_ready_for_masking, mask, clip_model, sentence):
-        applied_mask = image_ready_for_masking * mask + 0.5 * (~mask)
-        applied_mask = transforms.ToPILImage()(applied_mask)
-        # applied_mask = applied_mask.permute(2, 0, 1).unsqueeze(0)
-        # applied_masks.append(applied_mask)
+        if isinstance(clip_model, AlphaClipClassifier):
+            image_for_alpha_clip = clip_model.post_normalize_transform(
+                clip_model.before_normalize_transform(transforms.ToPILImage()(image_ready_for_masking))
+            ).unsqueeze(0).cuda()
+            mask_for_alpha_clip = clip_model.before_normalize_transform(mask.numpy()).unsqueeze(0).cuda()
+            applied_mask = (image_for_alpha_clip, mask_for_alpha_clip)
+        else:
+            applied_mask = image_ready_for_masking * mask + 0.5 * (~mask)
+            applied_mask = transforms.ToPILImage()(applied_mask)
+
         outputs = clip_model(
-            # image=applied_masks,
             image=applied_mask,
-            # candidate_labels=[x[0]['sentence']]
             candidate_labels=[sentence]
         )
         return outputs
-
 
     num_masks = masks_as_image.shape[0]
     if prediction_method == "iterative_removal":
 
         outputs = clip_model(
-            # image=applied_masks,
             image=transforms.ToPILImage()(image_ready_for_masking),
-            # candidate_labels=[x[0]['sentence']]
             candidate_labels=[sentence]
         )
         best_clip_score = outputs[0]['score']
@@ -358,7 +379,6 @@ def get_best_mask(
         best_mask = torch.ones_like(masks_as_image[0]).to(torch.bool)
     elif prediction_method == "iterative_addition":
         best_mask = torch.zeros_like(masks_as_image[0]).to(torch.bool)
-        # accumulated_mask = torch.zeros_like(masks_as_image[0]).to(torch.bool)
         best_clip_score = 0
     else:
         assert prediction_method == "best_clip_score"
@@ -394,18 +414,6 @@ def get_best_mask(
     else:
         raise ValueError(f"Invalid prediction method: {prediction_method}")
 
-    # outputs_list = self.clip_model(
-    #     image=applied_masks,
-    #     candidate_labels=[x[0]['sentence']]
-    # )
-
-    # best_clip_score = 0
-    # best_mask = None
-    # for i, outputs in enumerate(outputs_list):
-    #     # print(f"DEBUG: {i}: {outputs}")
-    #     if outputs[0]['score'] > best_clip_score:
-    #         best_clip_score = outputs[0]['score']
-    #         best_mask = masks_as_image[i]
     return best_mask, best_clip_score
 
 
@@ -464,22 +472,28 @@ def is_background_v2(mask, threshold=3):
     return False
 
 
-def build_clip_model():
+def build_clip_model(clip_type):
 
     # load pipe with proper text handling
     # <LIBS>/transformers/pipelines/zero_shot_image_classification.py
     # max_position_embeddings = 64 here: <LIBS>/transformers/models/siglip/modeling_siglip.py#329
     # inside clip.text_model.embeddings
-    image_classifier = pipeline(
-        task="zero-shot-image-classification",
-        # model="google/siglip2-base-patch16-224",
-        model="google/siglip2-so400m-patch14-384",
-        hypothesis_template="{}", # default: "This is a photo of {}."
-        tokenizer_kwargs={
-            "truncation": True,
-            "max_length": 64
-        }
-    )
+    if clip_type == "CLIP":
+        image_classifier = pipeline(
+            task="zero-shot-image-classification",
+            # model="google/siglip2-base-patch16-224",
+            model="google/siglip2-so400m-patch14-384",
+            hypothesis_template="{}", # default: "This is a photo of {}."
+            tokenizer_kwargs={
+                "truncation": True,
+                "max_length": 64
+            },
+            device_map='cuda'
+        )
+    else:
+        assert clip_type == "AlphaCLIP"
+        image_classifier = AlphaClipClassifier()
+        # image_classifier = make_alpha_clip_model(model_id="ViT-L/14")
 
     # inference demo
     # load image
@@ -496,6 +510,67 @@ def build_clip_model():
     # empty template s400: [{'score': 0.6312, 'label': '2 cats'}, {'score': 0.0002, 'label': 'a remote'}, {'score': 0.0, 'label': 'a plane'}]
     # default template b16: [{'score': 0.1719, 'label': '2 cats'}, {'score': 0.0241, 'label': 'a remote'}, {'score': 0.0, 'label': 'a plane'}]
     return image_classifier
+
+
+class AlphaClipClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.alpha_clip_model = None
+        self.recent_text_features = None
+        # self.transforms = make_transforms(
+        #     ALPHA_CLIP_IMAGE_PREPROCESS_CONFIG
+        # )
+        self.before_normalize_transform, self.post_normalize_transform = make_common_and_specific_transforms(
+            ALPHA_CLIP_IMAGE_PREPROCESS_CONFIG
+        )
+
+    def forward(self, image, candidate_labels):
+
+        # outputs = clip_model(
+        #     # image=applied_masks,
+        #     image=applied_mask,
+        #     # candidate_labels=[x[0]['sentence']]
+        #     candidate_labels=[sentence]
+        # )
+        assert len(candidate_labels) > 0, "Empty candidate labels"
+        if isinstance(candidate_labels[0], dict):
+            # {'raw': 'The elephant head on the right.', 'sent_id': 245062, 'ref_id': 92459}
+            candidate_labels = [x['raw'] for x in candidate_labels]
+        # add text for background to have at least two texts
+        assert len(candidate_labels) == 1, "Only one text is supported for AlphaCLIP"
+        # candidate_labels += ["background"]
+        make_model = False
+        if self.alpha_clip_model is None:
+            make_model = True
+        if self.recent_text_features != candidate_labels:
+            make_model = True
+        if make_model:
+            self.alpha_clip_model = make_alpha_clip_model(
+                model_id=ALPHA_CLIP_MODEL_ID,
+                category_list=candidate_labels
+            )
+            self.recent_text_features = candidate_labels
+
+        outputs = self.alpha_clip_model(image, softmax=False)
+        res = []
+        # for output in outputs:
+        #     res.append({
+        #         'score': output,
+        #     })
+        assert len(outputs.shape) == 2, "AlphaCLIP outputs must be a 2D tensor"
+        # first axis for inputs, second axis for texts
+        for input_i in range(outputs.shape[0]):
+            res_per_input = []
+            for text_i in range(outputs.shape[1]):
+                res_per_input.append({
+                    'score': outputs[input_i, text_i],
+                    'label': candidate_labels[text_i]
+                })
+            res.append(res_per_input)
+        if len(res) == 1:
+            res = res[0]
+        # return res[0] # take prob of the first text
+        return res
 
 
 def build_hqes():
