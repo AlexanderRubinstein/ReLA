@@ -32,10 +32,12 @@
                 "OUTPUT_DIR",
                 "output_dir/referring_res50/eval",
                 "REFMODEL",
-                "AlphaCLIP@HQES-iterative_addition"
+                // "AlphaCLIP@HQES-iterative_addition"
+                // "AlphaCLIP@FTdino-iterative_addition"
+                // "CLIP@HQES-iterative_addition"
+                "CLIP@FTdino-iterative_addition"
                 // "CLIP@HQES-best_clip_score"
                 // "CLIP@HQES-iterative_removal"
-                // "CLIP@HQES-iterative_addition"
             ],
             "console": "integratedTerminal",
             // "justMyCode": false
