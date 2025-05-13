@@ -9,6 +9,9 @@ from transformers import pipeline
 from PIL import Image
 import requests
 from torchvision import transforms
+import torch
+import subprocess
+import re
 
 OCCAM_ROOT = "/weka/oh/arubinstein17/github/OCCAM"
 HORNET_CONFIG = os.path.join(OCCAM_ROOT, "configs", "cropformer", "cropformer_hornet.yaml")
@@ -298,63 +301,64 @@ class ClipRefModel(nn.Module):
         self.prediction_method = prediction_method
 
     def forward(self, x):
-        assert len(x) == 1, "batch size must be 1"
-        image = x[0]['image'].permute(1, 2, 0).unsqueeze(0)
-        masks = self.mask_generator(image)
-        if isinstance(self.mask_generator, EntitySegDecoder):
-            num_masks = int(masks.max()) + 1
-            masks_as_image = torch.zeros(
-                (num_masks, masks.shape[0], masks.shape[1])
-            ).to(torch.bool)
-            for mask_value in range(num_masks):
-                masks_as_image[mask_value] = torch.Tensor(masks == mask_value)
-        else:
-            assert isinstance(self.mask_generator, FTDino)
-            masks_as_image = masks
+        with torch.no_grad():
+            assert len(x) == 1, "batch size must be 1"
+            image = x[0]['image'].permute(1, 2, 0).unsqueeze(0)
+            masks = self.mask_generator(image)
+            if isinstance(self.mask_generator, EntitySegDecoder):
+                num_masks = int(masks.max()) + 1
+                masks_as_image = torch.zeros(
+                    (num_masks, masks.shape[0], masks.shape[1])
+                ).to(torch.bool)
+                for mask_value in range(num_masks):
+                    masks_as_image[mask_value] = torch.Tensor(masks == mask_value)
+            else:
+                assert isinstance(self.mask_generator, FTDino)
+                masks_as_image = masks
 
-        image_ready_for_masking = image[0].permute(2, 0, 1)
+            image_ready_for_masking = image[0].permute(2, 0, 1)
 
-        # applied_masks = []
-        sentence = x[0]['sentence']
-        best_mask, best_clip_score = get_best_mask(
-            image_ready_for_masking,
-            masks_as_image,
-            self.clip_model,
-            sentence,
-            prediction_method=self.prediction_method
-        )
-        # best_mask, best_clip_score = get_best_mask(
-        #     image_ready_for_masking * best_mask + 1.0 * (~best_mask),
-        #     masks_as_image,
-        #     self.clip_model,
-        #     x[0]['sentence'],
-        #     prediction_method="iterative_removal"
-        # )
-        # print("DEBUG: remove removal")
+            # applied_masks = []
+            sentence = x[0]['sentence']
+            best_mask, best_clip_score = get_best_mask(
+                image_ready_for_masking,
+                masks_as_image,
+                self.clip_model,
+                sentence,
+                prediction_method=self.prediction_method
+            )
+            # best_mask, best_clip_score = get_best_mask(
+            #     image_ready_for_masking * best_mask + 1.0 * (~best_mask),
+            #     masks_as_image,
+            #     self.clip_model,
+            #     x[0]['sentence'],
+            #     prediction_method="iterative_removal"
+            # )
+            # print("DEBUG: remove removal")
 
-        if best_mask is None:
-            assert best_clip_score == 0.0, "no mask found"
+            if best_mask is None:
+                assert best_clip_score == 0.0, "no mask found"
 
-        # 0 - inverted best mask
-        # 1 - best mask
+            # 0 - inverted best mask
+            # 1 - best mask
 
-        res = {}
-        if isinstance(self.clip_model, AlphaClipClassifier):
-            no_target_threshold = NO_TARGET_THRESHOLD_ALPHA_CLIP
-        else:
-            no_target_threshold = NO_TARGET_THRESHOLD
+            res = {}
+            if isinstance(self.clip_model, AlphaClipClassifier):
+                no_target_threshold = NO_TARGET_THRESHOLD_ALPHA_CLIP
+            else:
+                no_target_threshold = NO_TARGET_THRESHOLD
 
-        if best_clip_score > no_target_threshold:
-            # res['nt_label'] = torch.tensor([(1 - best_clip_score), (best_clip_score)]).softmax(dim=0) # need softmax in case of clip scores outside of [0, 1]
-            res['nt_label'] = torch.tensor([1.0, 0.0]) # need softmax in case of clip scores outside of [0, 1]
-            best_mask = best_mask.to(torch.int).unsqueeze(0)
-            res['ref_seg'] = torch.cat([1 - best_mask, best_mask], dim=0)
-        else:
-            # no target case
-            res['nt_label'] = torch.tensor([0.0, 1.0])
-            res['ref_seg'] = torch.cat([torch.zeros_like(best_mask).to(torch.int), torch.zeros_like(best_mask).to(torch.int)], dim=0)
+            if best_clip_score > no_target_threshold:
+                # res['nt_label'] = torch.tensor([(1 - best_clip_score), (best_clip_score)]).softmax(dim=0) # need softmax in case of clip scores outside of [0, 1]
+                res['nt_label'] = torch.tensor([1.0, 0.0]) # need softmax in case of clip scores outside of [0, 1]
+                best_mask = best_mask.to(torch.int).unsqueeze(0)
+                res['ref_seg'] = torch.cat([1 - best_mask, best_mask], dim=0)
+            else:
+                # no target case
+                res['nt_label'] = torch.tensor([0.0, 1.0])
+                res['ref_seg'] = torch.cat([torch.zeros_like(best_mask).to(torch.int), torch.zeros_like(best_mask).to(torch.int)], dim=0)
 
-        return [res]
+            return [res]
 
 
 def get_best_mask(
@@ -589,6 +593,7 @@ class AlphaClipClassifier(nn.Module):
 
 
 def build_hqes():
+    set_device_with_most_free_memory()
     return EntitySegDecoder(
         config_path=HORNET_CONFIG,
         opts=["MODEL.WEIGHTS", HORNET_WEIGHTS],
@@ -621,6 +626,58 @@ class FTDino:
 
 def build_ftdino():
     return FTDino()
+
+
+def get_gpu_memory_map():
+    """Get the current gpu usage.
+    Returns
+    -------
+    usage: dict
+        Keys are device ids as integers.
+        Values are memory usage as integers in MB.
+    """
+    result = subprocess.check_output(
+        ['nvidia-smi', '--query-gpu=memory.free,memory.total',
+         '--format=csv,nounits,noheader'
+    ], encoding='utf-8')
+
+    # Parse the output
+    gpu_memory = {}
+    for i, line in enumerate(result.strip().split('\n')):
+        free_mem, total_mem = map(int, line.split(','))
+        gpu_memory[i] = free_mem
+
+    return gpu_memory
+
+def get_device_with_most_free_memory():
+    """Get the CUDA device with the most free memory.
+    Returns
+    -------
+    device: torch.device
+        The CUDA device with the most free memory
+    """
+    if not torch.cuda.is_available():
+        return torch.device('cpu')
+
+    gpu_memory = get_gpu_memory_map()
+    if not gpu_memory:
+        return torch.device('cpu')
+
+    # Get the device with most free memory
+    device_id = max(gpu_memory.items(), key=lambda x: x[1])[0]
+    return torch.device(f'cuda:{device_id}')
+
+def set_device_with_most_free_memory():
+    """Set the CUDA device with the most free memory as the current device.
+    Returns
+    -------
+    device: torch.device
+        The CUDA device that was set
+    """
+    device = get_device_with_most_free_memory()
+    if device.type == 'cuda':
+        torch.cuda.set_device(device)
+    return device
 
 
 if __name__ == "__main__":
