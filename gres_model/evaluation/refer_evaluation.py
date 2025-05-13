@@ -63,9 +63,11 @@ class ReferEvaluator(DatasetEvaluator):
                 'sent_info':input['sentence'],
                 'pred_nt': pred_nt,
                 'gt_nt': input.get('empty', False),
-                'pred_mask': pred_mask, 
-                'gt_mask': gt
-                })
+                'pred_mask': pred_mask,
+                'gt_mask': gt,
+                # 'original_image': input['image']
+                'file_name': input['file_name']
+            })
 
     def evaluate(self):
         if self._distributed:
@@ -83,7 +85,7 @@ class ReferEvaluator(DatasetEvaluator):
             self._logger.info(f'Saving output images to {file_path} ...')
             with PathManager.open(file_path, "wb") as f:
                 torch.save(predictions, f)
-        
+
         pr_thres = [.7, .8, .9]
 
         accum_I = {}
@@ -183,7 +185,7 @@ class ReferEvaluator(DatasetEvaluator):
         detected_srcs = [src for src in self._available_sources if total_count[src] > 0]
 
         final_results_list = []
-        
+
         # results for each source
         for src in detected_srcs:
             res = {}
@@ -200,12 +202,12 @@ class ReferEvaluator(DatasetEvaluator):
             for thres in pr_thres:
                 pr_name = 'Pr@{0:1.1f}'.format(thres)
                 res[pr_name] = pr_count[src][thres] * 100. / not_empty_count[src]
-            
+
             final_results_list.append((src, res))
-        
+
         def _sum_values(x):
             return sum(x.values())
-        
+
         # global results
         if len(detected_srcs) > 1:
             res_full = {}
@@ -217,7 +219,7 @@ class ReferEvaluator(DatasetEvaluator):
                 res_full[pr_name] = sum([pr_count[src][thres] for src in detected_srcs]) * 100. / _sum_values(not_empty_count)
 
             final_results_list.append(('full', res_full))
-        
+
         if self._output_dir:
             file_path = os.path.join(self._output_dir, f"{self._dataset_name}_results.json")
             with PathManager.open(file_path, "w") as f:
