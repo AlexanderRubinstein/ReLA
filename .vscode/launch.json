@@ -31,8 +31,10 @@
                 "checkpoints/gres_res50.pth",
                 "OUTPUT_DIR",
                 "output_dir/referring_res50/eval",
-                "REFMODEL",
-                "CLIP@HQES-best_clip_score"
+                // "REFMODEL",
+                // "CLIP@HQES-best_clip_score"
+                // "CLIP@HQES-iterative_removal"
+                // "CLIP@HQES-iterative_addition"
             ],
             "console": "integratedTerminal",
             // "justMyCode": false
