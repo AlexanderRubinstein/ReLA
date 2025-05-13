@@ -231,7 +231,11 @@ def main(args):
         if "CLIP" in cfg.REFMODEL:
             assert "@" in cfg.REFMODEL
             mask_generator = cfg.REFMODEL.split("@")[1]
-            model = build_clip_ref(mask_generator)
+            if "-" in cfg.REFMODEL:
+                prediction_method = cfg.REFMODEL.split("-")[1]
+            else:
+                prediction_method = "best_clip_score"
+            model = build_clip_ref(mask_generator, prediction_method)
         else:
             assert args.model is None
             model = Trainer.build_model(cfg)
@@ -248,18 +252,19 @@ def main(args):
     return trainer.train()
 
 
-def build_clip_ref(mask_generator):
-    return ClipRefModel(mask_generator)
+def build_clip_ref(mask_generator, prediction_method="best_clip_score"):
+    return ClipRefModel(mask_generator, prediction_method)
 
 
 class ClipRefModel(nn.Module):
-    def __init__(self, mask_generator):
+    def __init__(self, mask_generator, prediction_method="best_clip_score"):
         super().__init__()
         if mask_generator == "HQES":
             self.mask_generator = build_hqes()
         else:
             raise ValueError(f"Invalid mask generator: {mask_generator}")
         self.clip_model = build_clip_model()
+        self.prediction_method = prediction_method
 
     def forward(self, x):
         assert len(x) == 1, "batch size must be 1"
@@ -275,37 +280,13 @@ class ClipRefModel(nn.Module):
         image_ready_for_masking = image[0].permute(2, 0, 1)
 
         # applied_masks = []
-        best_clip_score = 0
-        best_mask = None
-        for i in range(num_masks):
-            cur_mask = masks_as_image[i]
-            if filter_out(cur_mask):
-                continue
-            applied_mask = image_ready_for_masking * cur_mask + 0.5 * (~cur_mask)
-            applied_mask = transforms.ToPILImage()(applied_mask)
-            # applied_mask = applied_mask.permute(2, 0, 1).unsqueeze(0)
-            # applied_masks.append(applied_mask)
-            outputs = self.clip_model(
-                # image=applied_masks,
-                image=applied_mask,
-                candidate_labels=[x[0]['sentence']]
-            )
-            if outputs[0]['score'] > best_clip_score:
-                best_clip_score = outputs[0]['score']
-                best_mask = masks_as_image[i]
-
-        # outputs_list = self.clip_model(
-        #     image=applied_masks,
-        #     candidate_labels=[x[0]['sentence']]
-        # )
-
-        # best_clip_score = 0
-        # best_mask = None
-        # for i, outputs in enumerate(outputs_list):
-        #     # print(f"DEBUG: {i}: {outputs}")
-        #     if outputs[0]['score'] > best_clip_score:
-        #         best_clip_score = outputs[0]['score']
-        #         best_mask = masks_as_image[i]
+        best_mask, best_clip_score = get_best_mask(
+            image_ready_for_masking,
+            masks_as_image,
+            self.clip_model,
+            x[0]['sentence'],
+            prediction_method=self.prediction_method
+        )
 
         assert best_mask is not None, "no mask found"
 
@@ -318,6 +299,53 @@ class ClipRefModel(nn.Module):
         res['ref_seg'] = torch.cat([1 - best_mask, best_mask], dim=0)
 
         return [res]
+
+
+def get_best_mask(
+    image_ready_for_masking,
+    masks_as_image,
+    clip_model,
+    sentence,
+    prediction_method="best_clip_score"
+):
+    best_clip_score = 0
+    best_mask = None
+    num_masks = masks_as_image.shape[0]
+    if prediction_method == "best_clip_score":
+
+        for i in range(num_masks):
+            cur_mask = masks_as_image[i]
+            if filter_out(cur_mask):
+                continue
+            applied_mask = image_ready_for_masking * cur_mask + 0.5 * (~cur_mask)
+            applied_mask = transforms.ToPILImage()(applied_mask)
+            # applied_mask = applied_mask.permute(2, 0, 1).unsqueeze(0)
+            # applied_masks.append(applied_mask)
+            outputs = clip_model(
+                # image=applied_masks,
+                image=applied_mask,
+                # candidate_labels=[x[0]['sentence']]
+                candidate_labels=[sentence]
+            )
+            if outputs[0]['score'] > best_clip_score:
+                best_clip_score = outputs[0]['score']
+                best_mask = masks_as_image[i]
+    else:
+        raise ValueError(f"Invalid prediction method: {prediction_method}")
+
+    # outputs_list = self.clip_model(
+    #     image=applied_masks,
+    #     candidate_labels=[x[0]['sentence']]
+    # )
+
+    # best_clip_score = 0
+    # best_mask = None
+    # for i, outputs in enumerate(outputs_list):
+    #     # print(f"DEBUG: {i}: {outputs}")
+    #     if outputs[0]['score'] > best_clip_score:
+    #         best_clip_score = outputs[0]['score']
+    #         best_mask = masks_as_image[i]
+    return best_mask, best_clip_score
 
 
 def filter_out(mask):
