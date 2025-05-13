@@ -369,7 +369,7 @@ def get_best_mask(
     prediction_method="best_clip_score"
 ):
 
-    def predict_for_mask(image_ready_for_masking, mask, clip_model, sentence):
+    def make_applied_mask(image_ready_for_masking, mask, clip_model):
         if isinstance(clip_model, AlphaClipClassifier):
             image_for_alpha_clip = clip_model.post_normalize_transform(
                 clip_model.before_normalize_transform(transforms.ToPILImage()(image_ready_for_masking))
@@ -379,6 +379,19 @@ def get_best_mask(
         else:
             applied_mask = image_ready_for_masking * mask + 0.5 * (~mask)
             applied_mask = transforms.ToPILImage()(applied_mask)
+        return applied_mask
+
+    def predict_for_mask(image_ready_for_masking, mask, clip_model, sentence):
+        # if isinstance(clip_model, AlphaClipClassifier):
+        #     image_for_alpha_clip = clip_model.post_normalize_transform(
+        #         clip_model.before_normalize_transform(transforms.ToPILImage()(image_ready_for_masking))
+        #     ).unsqueeze(0).cuda()
+        #     mask_for_alpha_clip = clip_model.before_normalize_transform(mask.numpy()).unsqueeze(0).cuda()
+        #     applied_mask = (image_for_alpha_clip, mask_for_alpha_clip)
+        # else:
+        #     applied_mask = image_ready_for_masking * mask + 0.5 * (~mask)
+        #     applied_mask = transforms.ToPILImage()(applied_mask)
+        applied_mask = make_applied_mask(image_ready_for_masking, mask, clip_model)
 
         outputs = clip_model(
             image=applied_mask,
@@ -389,8 +402,9 @@ def get_best_mask(
     num_masks = masks_as_image.shape[0]
     if prediction_method == "iterative_removal":
 
+        applied_mask = make_applied_mask(image_ready_for_masking, torch.ones_like(masks_as_image[0]).to(torch.bool), clip_model)
         outputs = clip_model(
-            image=transforms.ToPILImage()(image_ready_for_masking),
+            image=applied_mask,
             candidate_labels=[sentence]
         )
         best_clip_score = outputs[0]['score']
