@@ -5,6 +5,9 @@ This script is a simplified version of the training script in detectron2/tools.
 """
 import os
 import sys
+from transformers import pipeline
+from PIL import Image
+import requests
 
 OCCAM_ROOT = "/weka/oh/arubinstein17/github/OCCAM"
 HORNET_CONFIG = os.path.join(OCCAM_ROOT, "configs", "cropformer", "cropformer_hornet.yaml")
@@ -250,7 +253,7 @@ class ClipRefModel(nn.Module):
             self.mask_generator = build_hqes()
         else:
             raise ValueError(f"Invalid mask generator: {mask_generator}")
-        self.clip_model = build_clip_model() # SigLipV2 SO‑400M
+        self.clip_model = build_clip_model()
 
     def forward(self, x):
         image = x[0]['image'].permute(1, 2, 0).unsqueeze(0)
@@ -265,7 +268,37 @@ class ClipRefModel(nn.Module):
 
 
 def build_clip_model():
-    return None
+
+    # load pipe with proper text handling
+    # <LIBS>/transformers/pipelines/zero_shot_image_classification.py
+    # max_position_embeddings = 64 here: <LIBS>/transformers/models/siglip/modeling_siglip.py#329
+    # inside clip.text_model.embeddings
+    image_classifier = pipeline(
+        task="zero-shot-image-classification",
+        # model="google/siglip2-base-patch16-224",
+        model="google/siglip2-so400m-patch14-384",
+        hypothesis_template="{}", # default: "This is a photo of {}."
+        tokenizer_kwargs={
+            "truncation": True,
+            "max_length": 64
+        }
+    )
+
+    # inference demo
+    # load image
+    # url = 'http://images.cocodataset.org/val2017/000000039769.jpg'
+    # image = Image.open(requests.get(url, stream=True).raw)
+    # candidate_labels = ["2 cats", "a plane", "a remote"]
+    # outputs = image_classifier(
+    #     image,
+    #     candidate_labels=candidate_labels,
+    # )
+    # outputs = [{"score": round(output["score"], 4), "label": output["label"] } for output in outputs]
+    # print(outputs)
+    # empty template b16: [{'score': 0.3104, 'label': '2 cats'}, {'score': 0.002, 'label': 'a remote'}, {'score': 0.0, 'label': 'a plane'}]
+    # empty template s400: [{'score': 0.6312, 'label': '2 cats'}, {'score': 0.0002, 'label': 'a remote'}, {'score': 0.0, 'label': 'a plane'}]
+    # default template b16: [{'score': 0.1719, 'label': '2 cats'}, {'score': 0.0241, 'label': 'a remote'}, {'score': 0.0, 'label': 'a plane'}]
+    return image_classifier
 
 
 def build_hqes():
