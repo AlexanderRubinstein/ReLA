@@ -8,12 +8,17 @@ import sys
 from transformers import pipeline
 from PIL import Image
 import requests
+from torchvision import transforms
 
 OCCAM_ROOT = "/weka/oh/arubinstein17/github/OCCAM"
 HORNET_CONFIG = os.path.join(OCCAM_ROOT, "configs", "cropformer", "cropformer_hornet.yaml")
 HORNET_WEIGHTS = os.path.join(OCCAM_ROOT, "checkpoints", "CropFormer_hornet_3x_03823a.pth")
 CONF_THRESHOLD = 0.5
-from stuned.utility.utils import AttrDict
+RANDOM_SEED = 42
+from stuned.utility.utils import (
+    AttrDict,
+    apply_random_seed
+)
 sys.path.insert(
     # 0, (os.path.dirname(os.path.dirname(__file__)))
     0, (OCCAM_ROOT)
@@ -101,6 +106,7 @@ class Trainer(DefaultTrainer):
 
         data_loader = build_detection_test_loader(cfg, dataset_name, mapper=mapper)
         if cfg.DATALOADER.SAMPLER_TEST == "RandomSubsetTrainingSampler":
+            apply_random_seed(RANDOM_SEED)
             subset_sampler = RandomSubsetTrainingSampler(len(data_loader.dataset), cfg.DATALOADER.RANDOM_SUBSET_RATIO)
             data_loader = build_detection_test_loader(cfg, dataset_name, mapper=mapper, sampler=subset_sampler)
 
@@ -256,6 +262,7 @@ class ClipRefModel(nn.Module):
         self.clip_model = build_clip_model()
 
     def forward(self, x):
+        assert len(x) == 1, "batch size must be 1"
         image = x[0]['image'].permute(1, 2, 0).unsqueeze(0)
         masks = self.mask_generator(image)
         num_masks = int(masks.max()) + 1
@@ -264,7 +271,60 @@ class ClipRefModel(nn.Module):
         ).to(torch.bool)
         for mask_value in range(num_masks):
             masks_as_image[mask_value] = torch.Tensor(masks == mask_value)
-        return masks_as_image
+
+        image_ready_for_masking = image[0].permute(2, 0, 1)
+
+        # applied_masks = []
+        best_clip_score = 0
+        best_mask = None
+        for i in range(num_masks):
+            cur_mask = masks_as_image[i]
+            if filter_out(cur_mask):
+                continue
+            applied_mask = image_ready_for_masking * cur_mask + 0.5 * (~cur_mask)
+            applied_mask = transforms.ToPILImage()(applied_mask)
+            # applied_mask = applied_mask.permute(2, 0, 1).unsqueeze(0)
+            # applied_masks.append(applied_mask)
+            outputs = self.clip_model(
+                # image=applied_masks,
+                image=applied_mask,
+                candidate_labels=[x[0]['sentence']]
+            )
+            if outputs[0]['score'] > best_clip_score:
+                best_clip_score = outputs[0]['score']
+                best_mask = masks_as_image[i]
+
+        # outputs_list = self.clip_model(
+        #     image=applied_masks,
+        #     candidate_labels=[x[0]['sentence']]
+        # )
+
+        # best_clip_score = 0
+        # best_mask = None
+        # for i, outputs in enumerate(outputs_list):
+        #     # print(f"DEBUG: {i}: {outputs}")
+        #     if outputs[0]['score'] > best_clip_score:
+        #         best_clip_score = outputs[0]['score']
+        #         best_mask = masks_as_image[i]
+
+        assert best_mask is not None, "no mask found"
+
+        # 0 - inverted best mask
+        # 1 - best mask
+
+        res = {}
+        res['nt_label'] = torch.tensor([(1 - best_clip_score), (best_clip_score)])
+        best_mask = best_mask.to(torch.int).unsqueeze(0)
+        res['ref_seg'] = torch.cat([1 - best_mask, best_mask], dim=0)
+
+        return [res]
+
+
+def filter_out(mask):
+    # filter out masks that are too small
+    if mask.sum() < 200:
+        return True
+    return False
 
 
 def build_clip_model():
