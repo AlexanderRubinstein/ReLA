@@ -14,6 +14,7 @@ OCCAM_ROOT = "/weka/oh/arubinstein17/github/OCCAM"
 HORNET_CONFIG = os.path.join(OCCAM_ROOT, "configs", "cropformer", "cropformer_hornet.yaml")
 HORNET_WEIGHTS = os.path.join(OCCAM_ROOT, "checkpoints", "CropFormer_hornet_3x_03823a.pth")
 CONF_THRESHOLD = 0.5
+NO_TARGET_THRESHOLD = 0.02
 RANDOM_SEED = 42
 from stuned.utility.utils import (
     AttrDict,
@@ -24,6 +25,11 @@ sys.path.insert(
     0, (OCCAM_ROOT)
 )  # to allow importing from get_segments directly
 from occam.get_segments.run_cropformer import EntitySegDecoder
+from occam.robust_classification.masking import is_background
+from occam.robust_classification.eval import (
+    BORDER_VS_AREA_RATIO,
+    compute_border_touch
+)
 sys.path.pop(0)
 try:
     # ignore ShapelyDeprecationWarning from fvcore
@@ -228,16 +234,17 @@ def main(args):
     cfg = setup(args)
 
     if args.eval_only:
-        if "CLIP" in cfg.REFMODEL:
+        if cfg.REFMODEL is not None and "CLIP" in cfg.REFMODEL:
             assert "@" in cfg.REFMODEL
             mask_generator = cfg.REFMODEL.split("@")[1]
-            if "-" in cfg.REFMODEL:
-                prediction_method = cfg.REFMODEL.split("-")[1]
+            if "-" in mask_generator:
+                mask_generator, prediction_method = mask_generator.split("-")
+                # prediction_method = cfg.REFMODEL.split("-")[1]
             else:
                 prediction_method = "best_clip_score"
             model = build_clip_ref(mask_generator, prediction_method)
         else:
-            assert args.model is None
+            # assert args.model is None
             model = Trainer.build_model(cfg)
         DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
             cfg.MODEL.WEIGHTS, resume=args.resume
@@ -287,16 +294,30 @@ class ClipRefModel(nn.Module):
             x[0]['sentence'],
             prediction_method=self.prediction_method
         )
+        # best_mask, best_clip_score = get_best_mask(
+        #     image_ready_for_masking * best_mask + 1.0 * (~best_mask),
+        #     masks_as_image,
+        #     self.clip_model,
+        #     x[0]['sentence'],
+        #     prediction_method="iterative_removal"
+        # )
+        # print("DEBUG: remove removal")
 
-        assert best_mask is not None, "no mask found"
+        if best_mask is None:
+            assert best_clip_score == 0.0, "no mask found"
 
         # 0 - inverted best mask
         # 1 - best mask
 
         res = {}
-        res['nt_label'] = torch.tensor([(1 - best_clip_score), (best_clip_score)])
-        best_mask = best_mask.to(torch.int).unsqueeze(0)
-        res['ref_seg'] = torch.cat([1 - best_mask, best_mask], dim=0)
+        if best_clip_score > NO_TARGET_THRESHOLD:
+            res['nt_label'] = torch.tensor([(1 - best_clip_score), (best_clip_score)])
+            best_mask = best_mask.to(torch.int).unsqueeze(0)
+            res['ref_seg'] = torch.cat([1 - best_mask, best_mask], dim=0)
+        else:
+            # no target case
+            res['nt_label'] = torch.tensor([0.0, 1.0])
+            res['ref_seg'] = torch.cat([torch.zeros_like(best_mask).to(torch.int), torch.zeros_like(best_mask).to(torch.int)], dim=0)
 
         return [res]
 
@@ -308,28 +329,68 @@ def get_best_mask(
     sentence,
     prediction_method="best_clip_score"
 ):
-    best_clip_score = 0
-    best_mask = None
+
+    def predict_for_mask(image_ready_for_masking, mask, clip_model, sentence):
+        applied_mask = image_ready_for_masking * mask + 0.5 * (~mask)
+        applied_mask = transforms.ToPILImage()(applied_mask)
+        # applied_mask = applied_mask.permute(2, 0, 1).unsqueeze(0)
+        # applied_masks.append(applied_mask)
+        outputs = clip_model(
+            # image=applied_masks,
+            image=applied_mask,
+            # candidate_labels=[x[0]['sentence']]
+            candidate_labels=[sentence]
+        )
+        return outputs
+
+
     num_masks = masks_as_image.shape[0]
-    if prediction_method == "best_clip_score":
+    if prediction_method == "iterative_removal":
+
+        outputs = clip_model(
+            # image=applied_masks,
+            image=transforms.ToPILImage()(image_ready_for_masking),
+            # candidate_labels=[x[0]['sentence']]
+            candidate_labels=[sentence]
+        )
+        best_clip_score = outputs[0]['score']
+        cur_image = image_ready_for_masking
+        best_mask = torch.ones_like(masks_as_image[0]).to(torch.bool)
+    elif prediction_method == "iterative_addition":
+        best_mask = torch.zeros_like(masks_as_image[0]).to(torch.bool)
+        # accumulated_mask = torch.zeros_like(masks_as_image[0]).to(torch.bool)
+        best_clip_score = 0
+    else:
+        assert prediction_method == "best_clip_score"
+        best_mask = None
+        best_clip_score = 0
+    if prediction_method in ["best_clip_score", "iterative_removal", "iterative_addition"]:
 
         for i in range(num_masks):
             cur_mask = masks_as_image[i]
             if filter_out(cur_mask):
                 continue
-            applied_mask = image_ready_for_masking * cur_mask + 0.5 * (~cur_mask)
-            applied_mask = transforms.ToPILImage()(applied_mask)
-            # applied_mask = applied_mask.permute(2, 0, 1).unsqueeze(0)
-            # applied_masks.append(applied_mask)
-            outputs = clip_model(
-                # image=applied_masks,
-                image=applied_mask,
-                # candidate_labels=[x[0]['sentence']]
-                candidate_labels=[sentence]
-            )
-            if outputs[0]['score'] > best_clip_score:
-                best_clip_score = outputs[0]['score']
-                best_mask = masks_as_image[i]
+            if prediction_method == "best_clip_score":
+                outputs = predict_for_mask(image_ready_for_masking, cur_mask, clip_model, sentence)
+
+                if outputs[0]['score'] > best_clip_score:
+                    best_clip_score = outputs[0]['score']
+                    best_mask = masks_as_image[i]
+            elif prediction_method == "iterative_removal":
+                # iteratively remove masks if this removal increases score
+                outputs = predict_for_mask(cur_image, ~cur_mask, clip_model, sentence)
+                if outputs[0]['score'] >= best_clip_score:
+                    best_clip_score = outputs[0]['score']
+                    cur_image = cur_image * ~cur_mask + 0.5 * cur_mask
+
+                    best_mask = best_mask & ~cur_mask
+            else:
+                assert prediction_method == "iterative_addition"
+                cumulative_mask = best_mask | cur_mask
+                outputs = predict_for_mask(image_ready_for_masking, cumulative_mask, clip_model, sentence)
+                if outputs[0]['score'] > best_clip_score:
+                    best_clip_score = outputs[0]['score']
+                    best_mask = cumulative_mask
     else:
         raise ValueError(f"Invalid prediction method: {prediction_method}")
 
@@ -349,8 +410,56 @@ def get_best_mask(
 
 
 def filter_out(mask):
+    to_filter = False
     # filter out masks that are too small
     if mask.sum() < 200:
+        to_filter = True
+    # if is_background(mask, to_extract=False, threshold=3):
+    #     to_filter = True
+    if is_background_v2(mask, threshold=1):
+        to_filter = True
+    # border_touch = compute_border_touch(mask)
+    # mask_area = mask.sum() / (mask.shape[0] * mask.shape[1])
+    # if (border_touch / mask_area) > BORDER_VS_AREA_RATIO:
+    #     to_filter = True
+    return to_filter
+
+
+def is_background_v2(mask, threshold=3):
+    sum = (
+        mask[0, 0].item()
+        + mask[0, -1].item()
+        + mask[-1, 0].item()
+        + mask[-1, -1].item()
+    )
+    if sum > threshold:
+        return True
+    mid_0 = mask.shape[0] // 2
+    mid_1 = mask.shape[1] // 2
+    sum = (
+        mask[0, mid_1].item()
+        + mask[mid_0, -1].item()
+        + mask[-1, mid_1].item()
+        + mask[mid_0, 0].item()
+    )
+    if sum > threshold:
+        return True
+    q_00 = mid_0 // 2
+    q_10 = mid_1 // 2
+    q_01 = mid_0 + q_00
+    q_11 = mid_1 + q_10
+    sum = (
+        mask[0, q_10].item()
+        + mask[0, q_11].item()
+        + mask[q_00, 0].item()
+        + mask[q_01, 0].item()
+        + mask[q_00, -1].item()
+        + mask[q_01, -1].item()
+        + mask[-1, q_10].item()
+        + mask[-1, q_11].item()
+
+    )
+    if sum > threshold * 2:
         return True
     return False
 
