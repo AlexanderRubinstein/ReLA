@@ -15,13 +15,15 @@ HORNET_CONFIG = os.path.join(OCCAM_ROOT, "configs", "cropformer", "cropformer_ho
 HORNET_WEIGHTS = os.path.join(OCCAM_ROOT, "checkpoints", "CropFormer_hornet_3x_03823a.pth")
 CONF_THRESHOLD = 0.5
 NO_TARGET_THRESHOLD = 0.02
-NO_TARGET_THRESHOLD_ALPHA_CLIP = 0.0 # 20.0
+# NO_TARGET_THRESHOLD = 0.00
+NO_TARGET_THRESHOLD_ALPHA_CLIP = 20.0 # 20.0
 ALPHA_CLIP_MODEL_ID = "ViT-L/14"
 RANDOM_SEED = 42
 from stuned.utility.utils import (
     AttrDict,
     apply_random_seed
 )
+from ftdinosaur_inference import build_dinosaur, utils
 # from stuned.utility.transforms import (
 #     make_transforms
 # )
@@ -34,6 +36,13 @@ from occam.robust_classification.masking import is_background
 from occam.robust_classification.eval import (
     BORDER_VS_AREA_RATIO,
     compute_border_touch
+)
+from occam.submodules.dino_ft_wrapper import (
+    load_model,
+    # get_masks_as_image,
+    # overlay_masks_on_image,
+    # prep_for_display,
+    # get_cmap
 )
 from occam.submodules.alpha_clip_wrapper import (
     ALPHA_CLIP_IMAGE_PREPROCESS_CONFIG,
@@ -281,6 +290,8 @@ class ClipRefModel(nn.Module):
         super().__init__()
         if mask_generator == "HQES":
             self.mask_generator = build_hqes()
+        elif mask_generator == "FTdino":
+            self.mask_generator = build_ftdino()
         else:
             raise ValueError(f"Invalid mask generator: {mask_generator}")
         self.clip_model = build_clip_model(clip_type)
@@ -290,12 +301,16 @@ class ClipRefModel(nn.Module):
         assert len(x) == 1, "batch size must be 1"
         image = x[0]['image'].permute(1, 2, 0).unsqueeze(0)
         masks = self.mask_generator(image)
-        num_masks = int(masks.max()) + 1
-        masks_as_image = torch.zeros(
-            (num_masks, masks.shape[0], masks.shape[1])
-        ).to(torch.bool)
-        for mask_value in range(num_masks):
-            masks_as_image[mask_value] = torch.Tensor(masks == mask_value)
+        if isinstance(self.mask_generator, EntitySegDecoder):
+            num_masks = int(masks.max()) + 1
+            masks_as_image = torch.zeros(
+                (num_masks, masks.shape[0], masks.shape[1])
+            ).to(torch.bool)
+            for mask_value in range(num_masks):
+                masks_as_image[mask_value] = torch.Tensor(masks == mask_value)
+        else:
+            assert isinstance(self.mask_generator, FTDino)
+            masks_as_image = masks
 
         image_ready_for_masking = image[0].permute(2, 0, 1)
 
@@ -579,6 +594,33 @@ def build_hqes():
         opts=["MODEL.WEIGHTS", HORNET_WEIGHTS],
         confidence_threshold=CONF_THRESHOLD
     )
+
+
+class FTDino:
+    def __init__(self):
+        model_name = "dinosaur_base_patch14_518_topk3.coco_dv2_ft_s7_300k+10k"
+        model = load_model(model_name)
+        preproc = build_dinosaur.build_preprocessing(model_name)
+        self.model = model
+        self.preproc = preproc
+
+    def __call__(self, image):
+        image = image[0].permute(2, 0, 1)
+        with torch.no_grad():
+            inp = self.preproc(image).unsqueeze(0)
+            outp = self.model(inp, num_slots=5)
+        # mg_tensor = torch.from_numpy(np.array(img)).permute(2, 0, 1)  # C x H x W
+        height, width = image.shape[1:]
+        masks = outp['masks']
+
+        # Need to resize masks to image (1 x K x P -> 1 x K x H x W)
+        masks_as_image = utils.resize_patches_to_image(masks, size=(height, width))
+        masks_as_image = utils.soft_masks_to_one_hot(masks_as_image).squeeze(0)
+        return masks_as_image
+
+
+def build_ftdino():
+    return FTDino()
 
 
 if __name__ == "__main__":
