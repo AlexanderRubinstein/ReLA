@@ -38,11 +38,11 @@
                 // "AlphaCLIP@HQES-iterative_removal"
                 // "AlphaCLIP@FTdino-best_clip_score"
                 // "AlphaCLIP@HQES-best_clip_score"
-                "CLIP@HQES-iterative_addition"
+                // "CLIP@HQES-iterative_addition"
                 // "CLIP@FTdino-iterative_addition"
                 // "CLIP@HQES-best_clip_score"
                 // "CLIP@HQES-iterative_removal"
-                // "CLIP@Cuvler-iterative_addition"
+                "CLIP@Cuvler-iterative_addition"
                 // "AlphaCLIP@Cuvler-iterative_addition"
             ],
             "console": "integratedTerminal",

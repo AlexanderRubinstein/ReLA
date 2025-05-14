@@ -331,7 +331,7 @@ class ClipRefModel(nn.Module):
         with torch.no_grad():
             assert len(x) == 1, "batch size must be 1"
             image = x[0]['image'].permute(1, 2, 0).unsqueeze(0)
-            masks = self.mask_generator(image)
+            masks = self.mask_generator(image.cuda())
             if isinstance(self.mask_generator, EntitySegDecoder):
                 num_masks = int(masks.max()) + 1
                 masks_as_image = torch.zeros(
