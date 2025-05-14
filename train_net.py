@@ -339,6 +339,7 @@ class ClipRefModel(nn.Module):
                 ).to(torch.bool)
                 for mask_value in range(num_masks):
                     masks_as_image[mask_value] = torch.Tensor(masks == mask_value)
+                masks_as_image = masks_as_image.cuda()
             else:
                 assert isinstance(self.mask_generator, (FTDino, Cuvler))
                 masks_as_image = masks
