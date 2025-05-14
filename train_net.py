@@ -322,9 +322,12 @@ class ClipRefModel(nn.Module):
             self.mask_generator = build_ftdino()
         else:
             raise ValueError(f"Invalid mask generator: {mask_generator}")
-        self.mask_generator.to(torch.device(torch.cuda.current_device()))
+        # self.mask_generator.to(torch.device(torch.cuda.current_device()))
+        self.mask_generator.cuda()
         self.mask_generator.eval()
         self.clip_model = build_clip_model(clip_type)
+        # self.clip_model.cuda()
+        # self.clip_model.eval()
         self.prediction_method = prediction_method
 
     def forward(self, x):
