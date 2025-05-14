@@ -14,6 +14,7 @@ import subprocess
 import re
 
 OCCAM_ROOT = "/weka/oh/arubinstein17/github/OCCAM"
+CUVLER_ROOT = "/home/oh/arubinstein17/github/CuVLER"
 HORNET_CONFIG = os.path.join(OCCAM_ROOT, "configs", "cropformer", "cropformer_hornet.yaml")
 HORNET_WEIGHTS = os.path.join(OCCAM_ROOT, "checkpoints", "CropFormer_hornet_3x_03823a.pth")
 CONF_THRESHOLD = 0.5
@@ -105,6 +106,26 @@ from gres_model.data.samplers import RandomSubsetTrainingSampler
 import torch.nn as nn
 # import sys
 import numpy as np
+
+
+# CUVLER BEGIN
+sys.path.insert(0, CUVLER_ROOT)
+sys.path.insert(0, os.path.join(CUVLER_ROOT, "cad"))
+# /home/oh/arubinstein17/github/CuVLER/cad
+import detectron2
+from detectron2.modeling.roi_heads import (
+    ROI_HEADS_REGISTRY
+)
+import cad
+# /weka/oh/arubinstein17/github/OCCAM/envs/occam/lib/python3.10/site-packages/detectron2/modeling/roi_heads/roi_heads.py
+from cad.modeling.roi_heads import (
+    ROI_HEADS_REGISTRY as CUVLER_ROI_HEADS_REGISTRY,
+    CustomCascadeROIHeads
+)
+sys.path.pop(0)
+sys.path.pop(0)
+# CUVLER END
+
 
 class Trainer(DefaultTrainer):
 
@@ -291,12 +312,18 @@ def build_clip_ref(mask_generator, clip_type, prediction_method="best_clip_score
 class ClipRefModel(nn.Module):
     def __init__(self, mask_generator, clip_type, prediction_method="best_clip_score"):
         super().__init__()
+        set_device_with_most_free_memory()
+        print("torch.cuda.current_device() ", torch.cuda.current_device())
         if mask_generator == "HQES":
             self.mask_generator = build_hqes()
+        elif mask_generator == "Cuvler":
+            self.mask_generator = build_cuvler()
         elif mask_generator == "FTdino":
             self.mask_generator = build_ftdino()
         else:
             raise ValueError(f"Invalid mask generator: {mask_generator}")
+        self.mask_generator.to(torch.device(torch.cuda.current_device()))
+        self.mask_generator.eval()
         self.clip_model = build_clip_model(clip_type)
         self.prediction_method = prediction_method
 
@@ -313,10 +340,10 @@ class ClipRefModel(nn.Module):
                 for mask_value in range(num_masks):
                     masks_as_image[mask_value] = torch.Tensor(masks == mask_value)
             else:
-                assert isinstance(self.mask_generator, FTDino)
+                assert isinstance(self.mask_generator, (FTDino, Cuvler))
                 masks_as_image = masks
 
-            image_ready_for_masking = image[0].permute(2, 0, 1)
+            image_ready_for_masking = image[0].permute(2, 0, 1).cuda()
 
             # applied_masks = []
             sentence = x[0]['sentence']
@@ -374,7 +401,7 @@ def get_best_mask(
             image_for_alpha_clip = clip_model.post_normalize_transform(
                 clip_model.before_normalize_transform(transforms.ToPILImage()(image_ready_for_masking))
             ).unsqueeze(0).cuda()
-            mask_for_alpha_clip = clip_model.before_normalize_transform(mask.numpy()).unsqueeze(0).cuda()
+            mask_for_alpha_clip = clip_model.before_normalize_transform(mask.cpu().numpy()).unsqueeze(0).cuda()
             applied_mask = (image_for_alpha_clip, mask_for_alpha_clip)
         else:
             applied_mask = image_ready_for_masking * mask + 0.5 * (~mask)
@@ -607,7 +634,6 @@ class AlphaClipClassifier(nn.Module):
 
 
 def build_hqes():
-    set_device_with_most_free_memory()
     return EntitySegDecoder(
         config_path=HORNET_CONFIG,
         opts=["MODEL.WEIGHTS", HORNET_WEIGHTS],
@@ -615,8 +641,46 @@ def build_hqes():
     )
 
 
-class FTDino:
+def build_cuvler():
+    return Cuvler()
+
+
+class Cuvler(nn.Module):
     def __init__(self):
+        super().__init__()
+        cfg = torch.load(os.path.join(CUVLER_ROOT, "cuvler_cfg.pt"), weights_only=False)
+        # Merge the registries by copying all entries from CUVLER_ROI_HEADS_REGISTRY to ROI_HEADS_REGISTRY
+        for name, obj in CUVLER_ROI_HEADS_REGISTRY._obj_map.items():
+            if name not in ROI_HEADS_REGISTRY:
+                ROI_HEADS_REGISTRY._do_register(name, obj)
+        model = Trainer.build_model(cfg)
+        # cfg.MODEL.WEIGHTS = os.path.join(CUVLER_ROOT, "checkpoints", "zero_shot.pth")
+        DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
+            # cfg.MODEL.WEIGHTS,
+            os.path.join(CUVLER_ROOT, "checkpoints", "zero_shot.pth"),
+            # resume=args.resume
+            resume=False
+        )
+        self.model = model
+        # self.preproc = None
+
+    def __call__(self, image):
+        image = image.squeeze(0)
+        cuvler_input = [
+            {
+                'image': image.permute(2, 0, 1),
+                # 'image': image.permute(2, 0, 1).unsqueeze(0),
+                'height': image.shape[0],
+                'width': image.shape[1]
+            }
+        ]
+        output = self.model(cuvler_input)
+        masks_as_image = output[0]['instances'].pred_masks
+        return masks_as_image
+
+class FTDino(nn.Module):
+    def __init__(self):
+        super().__init__()
         model_name = "dinosaur_base_patch14_518_topk3.coco_dv2_ft_s7_300k+10k"
         model = load_model(model_name)
         preproc = build_dinosaur.build_preprocessing(model_name)
