@@ -291,6 +291,8 @@ def main(args):
             model = build_clip_ref(mask_generator, clip_type, prediction_method)
         else:
             # assert args.model is None
+            set_device_with_most_free_memory()
+            print("torch.cuda.current_device() ", torch.cuda.current_device())
             model = Trainer.build_model(cfg)
         DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
             cfg.MODEL.WEIGHTS, resume=args.resume
